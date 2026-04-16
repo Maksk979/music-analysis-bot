@@ -22,3 +22,6 @@ class BatchRecommendationRequest(BaseModel):
     file_ids: List[int]
     limit: int = 10
     method: str = "cosine"  # cosine, euclidean, pearson
+
+class WeightsUpdateRequest(BaseModel):
+    weights: dict  # например {"tempo": 1.5, "energy": 0.8}
