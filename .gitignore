@@ -1,31 +1,33 @@
-/target/
-Cargo.lock
+# ─── Rust ────────────────────────────────────────────────────────────────────
+target/
+**/*.rs.bk
+*.pdb
+Cargo.lock.bak
 
-venv/
-env/
-.env/
-.env
-
+# ─── Python ──────────────────────────────────────────────────────────────────
 __pycache__/
-*.pyc
-*.pyo
-*.pyd
+*.py[cod]
+*$py.class
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
 
-temp/
+# ─── Project artefacts ──────────────────────────────────────────────────────
+.env
+.env.local
+.env.*.local
+analyzer/temp/
+recs/model_data/
 
-.vscode/
+# ─── IDE ─────────────────────────────────────────────────────────────────────
 .idea/
-
-*.iml
-
+.vscode/
+*.swp
 .DS_Store
 Thumbs.db
 
-*.log
-
-*.db
-*.sqlite3
-
-dist/
-build/
-*.egg-info/
+# ─── Docker volumes (local-only) ─────────────────────────────────────────────
+**/postgres_data/
+**/minio_data/
