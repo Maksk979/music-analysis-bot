@@ -6,6 +6,7 @@
 2. Вызывает POST /api/notify на Rust-сервисе, чтобы тот обновил статус
    файла и уведомил клиентов.
 """
+
 import asyncio
 import logging
 import os
@@ -25,8 +26,7 @@ analyzer = AudioAnalyzer()
 # ─── Config ───────────────────────────────────────────────────────────────────
 
 DATABASE_URL = os.getenv(
-    "DATABASE_URL",
-    "postgresql://postgres:password@postgres:5432/track_analyzer"
+    "DATABASE_URL", "postgresql://postgres:password@postgres:5432/track_analyzer"
 )
 BOT_SERVICE_URL = os.getenv("BOT_SERVICE_URL", "http://bot:8080")
 INTERNAL_API_SECRET = os.getenv("INTERNAL_API_SECRET", "internal-secret")
@@ -34,13 +34,16 @@ INTERNAL_API_SECRET = os.getenv("INTERNAL_API_SECRET", "internal-secret")
 
 # ─── Main task ────────────────────────────────────────────────────────────────
 
+
 async def run_analysis(task_id: str, file_path: Path, task_manager):
     file_id: Optional[str] = None
     try:
         task_data = await task_manager.get_task(task_id)
-        file_id = task_data.get('file_id') if task_data else None
+        file_id = task_data.get("file_id") if task_data else None
 
-        logger.info(f"Запуск анализа задача={task_id} файл={file_path} file_id={file_id}")
+        logger.info(
+            f"Запуск анализа задача={task_id} файл={file_path} file_id={file_id}"
+        )
         await task_manager.update_task(task_id, TaskStatus.PROCESSING)
 
         result_dict = await asyncio.to_thread(analyzer.analyze_file, str(file_path))
@@ -48,12 +51,12 @@ async def run_analysis(task_id: str, file_path: Path, task_manager):
         result = AnalysisResult(
             task_id=task_id,
             status=TaskStatus.COMPLETED,
-            file_info=result_dict.get('file_info'),
-            spectral=result_dict.get('spectral'),
-            rhythm=result_dict.get('rhythm'),
-            harmonic=result_dict.get('harmonic'),
-            high_level=result_dict.get('high_level'),
-            analysis_metadata=result_dict.get('analysis_metadata'),
+            file_info=result_dict.get("file_info"),
+            spectral=result_dict.get("spectral"),
+            rhythm=result_dict.get("rhythm"),
+            harmonic=result_dict.get("harmonic"),
+            high_level=result_dict.get("high_level"),
+            analysis_metadata=result_dict.get("analysis_metadata"),
         )
 
         await task_manager.update_task(task_id, TaskStatus.COMPLETED, result=result)
@@ -81,11 +84,12 @@ async def run_analysis(task_id: str, file_path: Path, task_manager):
 
 # ─── Helpers ──────────────────────────────────────────────────────────────────
 
+
 async def _save_features_to_db(file_id: str, result_dict: dict):
     """Insert/upsert a row into audio_features."""
-    hl = result_dict.get('high_level', {})
-    rhythm = result_dict.get('rhythm', {})
-    harmonic = result_dict.get('harmonic', {})
+    hl = result_dict.get("high_level", {})
+    rhythm = result_dict.get("rhythm", {})
+    harmonic = result_dict.get("harmonic", {})
 
     try:
         conn = await asyncpg.connect(DATABASE_URL)
@@ -111,16 +115,16 @@ async def _save_features_to_db(file_id: str, result_dict: dict):
                     mode             = EXCLUDED.mode
                 """,
                 file_id,
-                rhythm.get('tempo'),
-                hl.get('energy'),
-                hl.get('danceability'),
-                hl.get('valence'),
-                hl.get('acousticness'),
-                hl.get('instrumentalness'),
-                hl.get('speechiness'),
-                hl.get('loudness'),
-                harmonic.get('key_index'),
-                1 if harmonic.get('mode') == 'major' else 0,
+                rhythm.get("tempo"),
+                hl.get("energy"),
+                hl.get("danceability"),
+                hl.get("valence"),
+                hl.get("acousticness"),
+                hl.get("instrumentalness"),
+                hl.get("speechiness"),
+                hl.get("loudness"),
+                harmonic.get("key_index"),
+                1 if harmonic.get("mode") == "major" else 0,
             )
             logger.info(f"Метрики сохранены в audio_features для file_id={file_id}")
         finally:

@@ -1,5 +1,6 @@
 import numpy as np
 
+
 def safe_float(value):
     """Безопасно преобразует numpy значение в Python float"""
     if isinstance(value, np.ndarray):
@@ -8,6 +9,7 @@ def safe_float(value):
         else:
             return float(np.mean(value))
     return float(value)
+
 
 def safe_int(value):
     """Безопасно преобразует numpy значение в Python int"""

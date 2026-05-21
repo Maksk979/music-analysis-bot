@@ -1,8 +1,22 @@
 import shutil
 from pathlib import Path
-from fastapi import APIRouter, Form, UploadFile, File, HTTPException, BackgroundTasks, Request
+from fastapi import (
+    APIRouter,
+    Form,
+    UploadFile,
+    File,
+    HTTPException,
+    BackgroundTasks,
+    Request,
+)
 from typing import Optional
-from app.models.schemas import AnalysisResponse, StatusResponse, AnalysisResult, TaskStatus, HealthResponse
+from app.models.schemas import (
+    AnalysisResponse,
+    StatusResponse,
+    AnalysisResult,
+    TaskStatus,
+    HealthResponse,
+)
 from app.services.analysis_service import run_analysis
 import logging
 import uuid
@@ -11,15 +25,16 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
-ALLOWED_EXTENSIONS = {'.mp3', '.wav', '.ogg', '.m4a', '.flac'}
+ALLOWED_EXTENSIONS = {".mp3", ".wav", ".ogg", ".m4a", ".flac"}
 MAX_FILE_SIZE = 50 * 1024 * 1024
 
 
 def _validate_and_save(file: UploadFile) -> Path:
     ext = Path(file.filename).suffix.lower()
     if ext not in ALLOWED_EXTENSIONS:
-        raise HTTPException(status_code=400,
-                            detail=f"Unsupported format. Allowed: {ALLOWED_EXTENSIONS}")
+        raise HTTPException(
+            status_code=400, detail=f"Unsupported format. Allowed: {ALLOWED_EXTENSIONS}"
+        )
     temp_dir = Path("temp")
     temp_dir.mkdir(exist_ok=True)
     return temp_dir / f"{uuid.uuid4()}{ext}"
@@ -38,7 +53,7 @@ async def analyze_audio(
     request: Request,
     background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
-    file_id: Optional[str] = Form(None),   # UUID from Rust service
+    file_id: Optional[str] = Form(None),  # UUID from Rust service
 ):
     """
     Принимает аудиофайл на анализ.
@@ -64,16 +79,16 @@ async def get_status(request: Request, task_id: str):
         raise HTTPException(status_code=404, detail="Task not found")
 
     progress_map = {
-        TaskStatus.PENDING.value:    0.0,
+        TaskStatus.PENDING.value: 0.0,
         TaskStatus.PROCESSING.value: 0.5,
-        TaskStatus.COMPLETED.value:  1.0,
-        TaskStatus.FAILED.value:     1.0,
+        TaskStatus.COMPLETED.value: 1.0,
+        TaskStatus.FAILED.value: 1.0,
     }
     return StatusResponse(
         task_id=task_id,
-        status=task['status'],
-        progress=progress_map.get(task['status']),
-        error=task.get('error'),
+        status=task["status"],
+        progress=progress_map.get(task["status"]),
+        error=task.get("error"),
     )
 
 
@@ -84,15 +99,17 @@ async def get_result(request: Request, task_id: str):
     if not task:
         raise HTTPException(status_code=404, detail="Task not found")
 
-    status = task['status']
+    status = task["status"]
     if status == TaskStatus.PENDING.value:
         raise HTTPException(status_code=425, detail="Task is pending")
     if status == TaskStatus.PROCESSING.value:
         raise HTTPException(status_code=425, detail="Task is still processing")
     if status == TaskStatus.FAILED.value:
-        raise HTTPException(status_code=500, detail=f"Analysis failed: {task.get('error')}")
+        raise HTTPException(
+            status_code=500, detail=f"Analysis failed: {task.get('error')}"
+        )
 
-    result_data = task.get('result')
+    result_data = task.get("result")
     if not result_data:
         raise HTTPException(status_code=500, detail="Result not found")
     return AnalysisResult(**result_data)

@@ -6,7 +6,7 @@ schema validation) without requiring a real audio file or librosa.
 
 Run with:  cd analyzer && pytest -q
 """
-import numpy as np
+
 import pytest
 
 from app.core.analyzer import AudioAnalyzer
@@ -17,16 +17,15 @@ from app.models.schemas import (
     FileInfo,
 )
 
-
 # ─── High-level metric computation ────────────────────────────────────────────
+
 
 @pytest.fixture
 def analyzer():
     return AudioAnalyzer()
 
 
-def make_features(rms=0.1, tempo=120.0, onset=2.5, harmonic_ratio=0.6,
-                  mfcc_mean=None):
+def make_features(rms=0.1, tempo=120.0, onset=2.5, harmonic_ratio=0.6, mfcc_mean=None):
     return {
         "file_info": {
             "filename": "x.mp3",
@@ -57,7 +56,9 @@ def test_valence_tracks_harmonic_ratio(analyzer):
 
 
 def test_danceability_in_unit_range(analyzer):
-    m = analyzer._compute_high_level_metrics(make_features(rms=0.05, tempo=128.0, onset=4.0))
+    m = analyzer._compute_high_level_metrics(
+        make_features(rms=0.05, tempo=128.0, onset=4.0)
+    )
     assert 0.0 <= m["danceability"] <= 1.0
 
 
@@ -84,6 +85,7 @@ def test_short_mfcc_falls_back_to_default_instrumentalness(analyzer):
 
 # ─── Schema validation ───────────────────────────────────────────────────────
 
+
 def test_task_status_enum_string_values():
     assert TaskStatus.PENDING.value == "pending"
     assert TaskStatus.PROCESSING.value == "processing"
@@ -93,9 +95,13 @@ def test_task_status_enum_string_values():
 
 def test_high_level_metrics_round_trip():
     m = HighLevelMetrics(
-        energy=0.5, danceability=0.6, valence=0.7,
-        acousticness=0.4, instrumentalness=0.3,
-        speechiness=0.7, loudness=-10.0,
+        energy=0.5,
+        danceability=0.6,
+        valence=0.7,
+        acousticness=0.4,
+        instrumentalness=0.3,
+        speechiness=0.7,
+        loudness=-10.0,
     )
     payload = m.model_dump()
     restored = HighLevelMetrics(**payload)
