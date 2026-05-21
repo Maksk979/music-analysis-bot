@@ -20,16 +20,17 @@ use tower_http::{cors::CorsLayer, trace::TraceLayer};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 use crate::config::Config;
-use services::{database::DatabaseService, storage::StorageService};
+use services::{analyzer::AnalyzerClient, database::DatabaseService, storage::StorageService};
 use utils::jwt::JwtService;
 
-/// Shared application state вЂ” cloned into every handler
+/// Shared application state — cloned into every handler
 #[derive(Clone)]
 pub struct AppState {
     pub db: DatabaseService,
     pub storage: StorageService,
     pub jwt: Arc<JwtService>,
     pub config: Arc<Config>,
+    pub analyzer: AnalyzerClient,
 }
 
 impl axum::extract::FromRef<AppState> for Arc<JwtService> {
@@ -68,11 +69,14 @@ async fn main() -> anyhow::Result<()> {
     // JWT
     let jwt = Arc::new(JwtService::new(&config.jwt_secret, config.jwt_expiry_hours));
 
+    let analyzer = AnalyzerClient::new(&config.analyzer_service_url);
+
     let state = AppState {
         db,
         storage,
         jwt,
         config: config.clone(),
+        analyzer,
     };
 
     // Run Axum REST API and Telegram bot concurrently
@@ -90,6 +94,7 @@ async fn run_api_server(state: AppState) -> anyhow::Result<()> {
     let router = Router::new()
         .route("/health", get(handlers::health::health_handler))
         .route("/api/upload", post(handlers::upload::upload_handler))
+        .route("/api/notify", post(handlers::webhook_notify::notify_handler))
         .layer(CorsLayer::permissive())
         .layer(TraceLayer::new_for_http())
         .with_state(state.clone());

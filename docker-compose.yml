@@ -1,7 +1,18 @@
 version: "3.9"
 
+# ─── Shared env ──────────────────────────────────────────────────────────────
+x-common-db-env: &common-db-env
+  DATABASE_URL: postgresql://postgres:password@postgres:5432/track_analyzer
+
+x-common-redis-env: &common-redis-env
+  REDIS_URL: redis://redis:6379
+
+x-internal-secret: &internal-secret
+  INTERNAL_API_SECRET: ${INTERNAL_API_SECRET:-internal-secret}
+
 services:
-  # ─── PostgreSQL ──────────────────────────────────────────────────────────────
+
+  # ─── PostgreSQL ─────────────────────────────────────────────────────────────
   postgres:
     image: postgres:16-alpine
     restart: unless-stopped
@@ -10,7 +21,7 @@ services:
       POSTGRES_PASSWORD: password
       POSTGRES_DB: track_analyzer
     ports:
-      - "5432:5433"
+      - "5432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
@@ -19,7 +30,19 @@ services:
       timeout: 5s
       retries: 5
 
-  # ─── MinIO ───────────────────────────────────────────────────────────────────
+  # ─── Redis ──────────────────────────────────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # ─── MinIO ──────────────────────────────────────────────────────────────────
   minio:
     image: minio/minio:latest
     restart: unless-stopped
@@ -28,8 +51,8 @@ services:
       MINIO_ROOT_USER: minioadmin
       MINIO_ROOT_PASSWORD: minioadmin
     ports:
-      - "9000:9000"   # S3 API
-      - "9001:9001"   # Web console
+      - "9000:9000"
+      - "9001:9001"
     volumes:
       - minio_data:/data
     healthcheck:
@@ -38,7 +61,6 @@ services:
       timeout: 5s
       retries: 5
 
-  # ─── MinIO bucket creation (one-shot) ────────────────────────────────────────
   minio-init:
     image: minio/mc:latest
     depends_on:
@@ -52,14 +74,21 @@ services:
         echo 'Bucket ready';
       "
 
-  # ─── Track Analyzer Bot (Мельников's service) ────────────────────────────────
+  # ─── Track Analyzer Bot — Rust (Мельников) ──────────────────────────────────
   bot:
     build: .
     restart: unless-stopped
     env_file: .env
     environment:
-      DATABASE_URL: postgres://postgres:password@postgres:5432/track_analyzer
+      <<: [*common-db-env, *internal-secret]
       MINIO_ENDPOINT: http://minio:9000
+      ANALYZER_SERVICE_URL: http://analyzer:8001
+      RECOMMENDER_SERVICE_URL: http://recs:8002
+      HTTPS_PROXY: http://host.docker.internal:7897
+      HTTP_PROXY:  http://host.docker.internal:7897
+      NO_PROXY:    postgres,redis,minio,analyzer,recs,localhost,127.0.0.1
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     ports:
       - "8080:8080"
     depends_on:
@@ -69,6 +98,37 @@ services:
         condition: service_healthy
       minio-init:
         condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+
+  # ─── Audio Analyzer — Python (Копылов) ──────────────────────────────────────
+  analyzer:
+    build: ./analyzer
+    restart: unless-stopped
+    environment:
+      <<: [*common-db-env, *common-redis-env, *internal-secret]
+      BOT_SERVICE_URL: http://bot:8080
+    ports:
+      - "8001:8001"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  # ─── Recommendations — Python (Беляков) ─────────────────────────────────────
+  recs:
+    build: ./recs
+    restart: unless-stopped
+    environment:
+      <<: [*common-db-env, *common-redis-env]
+    ports:
+      - "8002:8002"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
 
 volumes:
   postgres_data:

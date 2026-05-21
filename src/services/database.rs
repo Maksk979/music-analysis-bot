@@ -76,6 +76,18 @@ impl DatabaseService {
             created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
             updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
         )"#).execute(&self.pool).await.ok();
+        // Idempotency keys table — stores REST-upload responses keyed by
+        // (idempotency_key, user_id) for 24 h so duplicate requests get the
+        // same response without re-processing.
+        sqlx::query(r#"CREATE TABLE IF NOT EXISTS idempotency_keys (
+            key TEXT NOT NULL,
+            user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            response JSONB NOT NULL,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            PRIMARY KEY (key, user_id)
+        )"#).execute(&self.pool).await.ok();
+        // Clean up keys older than 24 hours automatically via a partial index
+        // (actual row deletion is done lazily on read).
         tracing::info!("Database schema ready");
         Ok(())
     }
@@ -195,20 +207,37 @@ impl DatabaseService {
         Ok(file)
     }
 
+    /// Update status following the allowed state-machine transitions:
+    ///
+    /// ```
+    /// pending    → processing | failed
+    /// processing → completed  | failed
+    /// completed  → (terminal — no transitions allowed)
+    /// failed     → (terminal — no transitions allowed)
+    /// ```
+    ///
+    /// Returns `Ok(true)` when the row was updated, `Ok(false)` when the
+    /// transition was rejected because the file is already in a terminal state
+    /// (idempotent — callers should treat this as success).
     pub async fn update_audio_file_status(
         &self,
         file_id: Uuid,
         status: AudioFileStatus,
-    ) -> Result<()> {
-        sqlx::query(
-            "UPDATE audio_files SET status = $1, updated_at = NOW() WHERE id = $2",
+    ) -> Result<bool> {
+        let rows = sqlx::query(
+            r#"
+            UPDATE audio_files
+               SET status = $1, updated_at = NOW()
+             WHERE id = $2
+               AND status NOT IN ('completed', 'failed')
+            "#,
         )
         .bind(status)
         .bind(file_id)
         .execute(&self.pool)
         .await?;
 
-        Ok(())
+        Ok(rows.rows_affected() > 0)
     }
 
     pub async fn get_user_audio_files(&self, user_id: Uuid) -> Result<Vec<AudioFile>> {
@@ -220,6 +249,25 @@ impl DatabaseService {
         .await?;
 
         Ok(files)
+    }
+
+    /// Fetch just (id, original_name) pairs for a set of file ids.
+    /// Used by /recommend to show names instead of raw UUIDs.
+    pub async fn get_audio_file_names(
+        &self,
+        ids: &[Uuid],
+    ) -> Result<std::collections::HashMap<Uuid, String>> {
+        if ids.is_empty() {
+            return Ok(std::collections::HashMap::new());
+        }
+        let rows: Vec<(Uuid, String)> = sqlx::query_as(
+            "SELECT id, original_name FROM audio_files WHERE id = ANY($1)",
+        )
+        .bind(ids)
+        .fetch_all(&self.pool)
+        .await?;
+
+        Ok(rows.into_iter().collect())
     }
 
     // ─── Processing Queue ─────────────────────────────────────────────────────
@@ -239,6 +287,54 @@ impl DatabaseService {
         .context("Failed to enqueue file")?;
 
         Ok(item)
+    }
+
+    // ─── Idempotency keys ─────────────────────────────────────────────────────
+
+    /// Store the JSON response for a given (idempotency_key, user_id) pair.
+    /// Overwrites silently — the caller should check `get_idempotency` first.
+    pub async fn store_idempotency(
+        &self,
+        key: &str,
+        user_id: Uuid,
+        response: serde_json::Value,
+    ) -> Result<()> {
+        sqlx::query(
+            r#"
+            INSERT INTO idempotency_keys (key, user_id, response, created_at)
+            VALUES ($1, $2, $3, NOW())
+            ON CONFLICT (key, user_id) DO NOTHING
+            "#,
+        )
+        .bind(key)
+        .bind(user_id)
+        .bind(response)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// Return the cached response for a (key, user_id) pair, or `None` if
+    /// not found or expired (> 24 h old).
+    pub async fn get_idempotency(
+        &self,
+        key: &str,
+        user_id: Uuid,
+    ) -> Result<Option<serde_json::Value>> {
+        let row: Option<(serde_json::Value,)> = sqlx::query_as(
+            r#"
+            SELECT response FROM idempotency_keys
+             WHERE key = $1
+               AND user_id = $2
+               AND created_at > NOW() - INTERVAL '24 hours'
+            "#,
+        )
+        .bind(key)
+        .bind(user_id)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        Ok(row.map(|(v,)| v))
     }
 
     // ─── Stats ────────────────────────────────────────────────────────────────

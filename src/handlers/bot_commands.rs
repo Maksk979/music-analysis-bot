@@ -8,6 +8,7 @@ use uuid::Uuid;
 use crate::{
     models::CreateUser,
     utils::file_validator::{compute_hash, mime_from_extension, validate_file},
+    utils::zip_handlers::extract_audio_from_zip,
     AppState,
 };
 
@@ -298,6 +299,16 @@ pub async fn handle_audio_message(
 
     let content_type = mime_hint.unwrap_or_else(|| mime_from_extension(&filename).to_string());
 
+    // ── ZIP-архив: извлекаем все аудиофайлы и обрабатываем каждый ─────────────
+    let is_zip = content_type == "application/zip"
+        || content_type == "application/x-zip-compressed"
+        || filename.to_lowercase().ends_with(".zip");
+ 
+    if is_zip {
+        return handle_zip_message(bot, msg.chat.id, progress_msg.id, &from, &lang, bytes, &state).await;
+    }
+ 
+
     if let Err(e) = validate_file(&bytes, &content_type, &state.config.allowed_mime_types, state.config.max_file_size) {
         bot.edit_message_text(msg.chat.id, progress_msg.id, e.to_string()).await?;
         return Ok(());
@@ -357,6 +368,20 @@ pub async fn handle_audio_message(
 
     let _ = state.db.enqueue_file(audio_file.id).await;
 
+    // Submit to analyzer (fire-and-forget)
+    {
+        let analyzer = state.analyzer.clone();
+        let fid = audio_file.id;
+        let b = bytes.clone();
+        let fn_ = audio_file.original_name.clone();
+        let mt = audio_file.mime_type.clone();
+        tokio::spawn(async move {
+            if let Err(e) = analyzer.submit_file(fid, b, fn_, mt).await {
+                tracing::warn!("Analyzer submission failed for {}: {}", fid, e);
+            }
+        });
+    }
+
     let success = txt_upload_ok(
         &lang,
         &audio_file.original_name,
@@ -367,6 +392,140 @@ pub async fn handle_audio_message(
 
     Ok(())
 }
+
+// ─── ZIP batch upload (п. 1.7 ТЗ) ────────────────────────────────────────────
+ 
+async fn handle_zip_message(
+    bot: Bot,
+    chat_id: teloxide::types::ChatId,
+    progress_id: teloxide::types::MessageId,
+    from: &teloxide::types::User,
+    lang: &Lang,
+    zip_bytes: Vec<u8>,
+    state: &AppState,
+) -> ResponseResult<()> {
+    let extracted = match extract_audio_from_zip(&zip_bytes) {
+        Ok(files) => files,
+        Err(e) => {
+            let text = match lang {
+                Lang::Ru => format!("Не удалось распаковать архив: {}", e),
+                Lang::En => format!("Failed to unpack archive: {}", e),
+            };
+            bot.edit_message_text(chat_id, progress_id, text).await?;
+            return Ok(());
+        }
+    };
+ 
+    let total = extracted.len();
+    let header = match lang {
+        Lang::Ru => format!("Найдено {} аудиофайл(ов) в архиве. Загружаю...", total),
+        Lang::En => format!("Found {} audio file(s) in archive. Uploading...", total),
+    };
+    bot.edit_message_text(chat_id, progress_id, header).await?;
+ 
+    let user = match state.db.upsert_user(&CreateUser {
+        telegram_id: from.id.0 as i64,
+        username:    from.username.clone(),
+        first_name:  from.first_name.clone(),
+        last_name:   from.last_name.clone(),
+        lang:        lang.as_str().to_string(),
+    }).await {
+        Ok(u) => u,
+        Err(_) => {
+            bot.edit_message_text(chat_id, progress_id, "Internal error.").await?;
+            return Ok(());
+        }
+    };
+ 
+    let mut saved = 0usize;
+    let mut skipped = 0usize;
+    let mut errors = 0usize;
+ 
+    for (idx, file) in extracted.into_iter().enumerate() {
+        // Прогресс-бар
+        let bar_done = (idx + 1) * 10 / total;
+        let bar = format!(
+            "[{}{}] {}/{}",
+            "█".repeat(bar_done),
+            "░".repeat(10 - bar_done),
+            idx + 1,
+            total
+        );
+        let progress_text = match lang {
+            Lang::Ru => format!("Обрабатываю: {}\n{}", file.name, bar),
+            Lang::En => format!("Processing: {}\n{}", file.name, bar),
+        };
+        bot.edit_message_text(chat_id, progress_id, progress_text).await.ok();
+ 
+        if let Err(_) = validate_file(
+            &file.data,
+            &file.mime_type,
+            &state.config.allowed_mime_types,
+            state.config.max_file_size,
+        ) {
+            errors += 1;
+            continue;
+        }
+ 
+        let file_hash = compute_hash(&file.data);
+        if let Ok(Some(_)) = state.db.find_duplicate_by_hash(user.id, &file_hash).await {
+            skipped += 1;
+            continue;
+        }
+ 
+        let minio_key = format!("users/{}/{}/{}", user.id, Uuid::new_v4(), file.name);
+ 
+        if state.storage.upload_file(&minio_key, &file.data, &file.mime_type).await.is_err() {
+            errors += 1;
+            continue;
+        }
+ 
+        let audio_file = match state.db.create_audio_file(&crate::models::CreateAudioFile {
+            user_id:       user.id,
+            original_name: file.name,
+            minio_key,
+            file_size:     file.data.len() as i64,
+            mime_type:     file.mime_type,
+            file_hash,
+        }).await {
+            Ok(f) => f,
+            Err(_) => { errors += 1; continue; }
+        };
+ 
+        let _ = state.db.enqueue_file(audio_file.id).await;
+
+        // Submit to analyzer (fire-and-forget)
+        {
+            let analyzer = state.analyzer.clone();
+            let fid = audio_file.id;
+            let b = file.data.clone();
+            let fn_ = audio_file.original_name.clone();
+            let mt = audio_file.mime_type.clone();
+            tokio::spawn(async move {
+                if let Err(e) = analyzer.submit_file(fid, b, fn_, mt).await {
+                    tracing::warn!("Analyzer submission failed for {}: {}", fid, e);
+                }
+            });
+        }
+
+        saved += 1;
+    }
+ 
+    let summary = match lang {
+        Lang::Ru => format!(
+            "Архив обработан!\n\nЗагружено: {}\nПропущено (дубли): {}\nОшибки: {}\n\nПроверь /history.",
+            saved, skipped, errors
+        ),
+        Lang::En => format!(
+            "Archive processed!\n\nUploaded: {}\nSkipped (duplicates): {}\nErrors: {}\n\nCheck /history.",
+            saved, skipped, errors
+        ),
+    };
+    bot.edit_message_text(chat_id, progress_id, summary).await?;
+ 
+    Ok(())
+}
+ 
 
 // ─── /history ─────────────────────────────────────────────────────────────────
 
@@ -426,26 +585,54 @@ async fn cmd_recommend(bot: Bot, msg: Message, state: AppState) -> ResponseResul
 
     let url = format!("{}/recommendations/{}", state.config.recommender_service_url, file.id);
 
-    match reqwest::get(&url).await {
-        Ok(r) if r.status().is_success() => {
-            let body: serde_json::Value = r.json().await.unwrap_or_default();
-            let header = match lang {
-                Lang::Ru => format!("Рекомендации для {}:\n\n", file.original_name),
-                Lang::En => format!("Recommendations for {}:\n\n", file.original_name),
-            };
-            let text = format!("{}{}", header,
-                serde_json::to_string_pretty(&body).unwrap_or_else(|_| "No data".to_string()));
-            bot.send_message(msg.chat.id, text).await?;
-        }
+    #[derive(serde::Deserialize)]
+    struct RecItem {
+        file_id: String,
+        #[allow(dead_code)]
+        similarity_score: f64,
+    }
+
+    let recs: Vec<RecItem> = match reqwest::get(&url).await {
+        Ok(r) if r.status().is_success() => r.json().await.unwrap_or_default(),
         _ => {
             let t = match lang {
                 Lang::Ru => "Сервис рекомендаций недоступен. Попробуй позже.",
                 Lang::En => "Recommender service unavailable. Try again later.",
             };
             bot.send_message(msg.chat.id, t).await?;
+            return Ok(());
         }
+    };
+
+    if recs.is_empty() {
+        let t = match lang {
+            Lang::Ru => "Похожих треков пока нет — загрузи ещё несколько файлов.",
+            Lang::En => "No similar tracks yet — upload a few more files.",
+        };
+        bot.send_message(msg.chat.id, t).await?;
+        return Ok(());
     }
 
+    let ids: Vec<Uuid> = recs.iter()
+        .filter_map(|r| Uuid::parse_str(&r.file_id).ok())
+        .collect();
+    let names = state.db.get_audio_file_names(&ids).await.unwrap_or_default();
+
+    let header = match lang {
+        Lang::Ru => format!("🎵 Похожие на «{}»:\n", file.original_name),
+        Lang::En => format!("🎵 Similar to \"{}\":\n", file.original_name),
+    };
+
+    let mut lines = vec![header];
+    for (i, r) in recs.iter().enumerate() {
+        let name = Uuid::parse_str(&r.file_id)
+            .ok()
+            .and_then(|u| names.get(&u).cloned())
+            .unwrap_or_else(|| r.file_id.clone());
+        lines.push(format!("{}. {}", i + 1, name));
+    }
+
+    bot.send_message(msg.chat.id, lines.join("\n")).await?;
     Ok(())
 }
 

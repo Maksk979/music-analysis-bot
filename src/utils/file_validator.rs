@@ -182,4 +182,67 @@ mod tests {
         assert_eq!(h1, h2);
         assert_eq!(h1.len(), 64); // SHA-256 hex
     }
+
+    #[test]
+    fn test_hash_differs_for_different_input() {
+        assert_ne!(compute_hash(b"alpha"), compute_hash(b"beta"));
+    }
+
+    #[test]
+    fn test_mp3_id3_header_accepted() {
+        let mut data = vec![0u8; 200];
+        data[0..3].copy_from_slice(b"ID3");
+        assert!(validate_file(&data, "audio/mpeg", &allowed(), 1_000_000).is_ok());
+    }
+
+    #[test]
+    fn test_mp3_sync_word_accepted() {
+        let mut data = vec![0u8; 200];
+        data[0] = 0xFF;
+        data[1] = 0xE0;
+        assert!(validate_file(&data, "audio/mpeg", &allowed(), 1_000_000).is_ok());
+    }
+
+    #[test]
+    fn test_mp3_garbage_rejected() {
+        let data = vec![0xAA, 0xBB, 0xCC, 0xDD, 0xEE];
+        let result = validate_file(&data, "audio/mpeg", &allowed(), 1_000_000);
+        assert!(matches!(result, Err(FileValidationError::InvalidFileHeader { .. })));
+    }
+
+    #[test]
+    fn test_flac_magic_bytes() {
+        let mut data = vec![0u8; 200];
+        data[0..4].copy_from_slice(b"fLaC");
+        let mut allowed = allowed();
+        allowed.push("audio/flac".to_string());
+        assert!(validate_file(&data, "audio/flac", &allowed, 1_000_000).is_ok());
+    }
+
+    #[test]
+    fn test_m4a_ftyp_box() {
+        let mut data = vec![0u8; 200];
+        data[4..8].copy_from_slice(b"ftyp");
+        assert!(validate_file(&data, "audio/x-m4a", &allowed(), 1_000_000).is_ok());
+    }
+
+    #[test]
+    fn test_mime_from_extension() {
+        assert_eq!(mime_from_extension("song.mp3"), "audio/mpeg");
+        assert_eq!(mime_from_extension("track.WAV"), "audio/wav");
+        assert_eq!(mime_from_extension("a.ogg"), "audio/ogg");
+        assert_eq!(mime_from_extension("b.m4a"), "audio/x-m4a");
+        assert_eq!(mime_from_extension("c.flac"), "audio/flac");
+        assert_eq!(mime_from_extension("readme"), "application/octet-stream");
+        assert_eq!(mime_from_extension(""), "application/octet-stream");
+    }
+
+    #[test]
+    fn test_mime_with_charset_param_normalized() {
+        // multipart sometimes adds charset to MIME — ensure we strip it
+        let mut data = vec![0u8; 200];
+        data[0..4].copy_from_slice(b"RIFF");
+        data[8..12].copy_from_slice(b"WAVE");
+        assert!(validate_file(&data, "audio/wav; charset=binary", &allowed(), 1_000_000).is_ok());
+    }
 }

@@ -7,6 +7,10 @@ edition = "2021"
 name = "bot"
 path = "src/main.rs"
 
+[[bin]]
+name = "seed"
+path = "src/bin/seed.rs"
+
 [dependencies]
 teloxide = { version = "0.12", features = ["macros", "webhooks-axum"] }
 tokio = { version = "1", features = ["full"] }
@@ -15,6 +19,7 @@ tower = "0.4"
 tower-http = { version = "0.5", features = ["cors", "trace"] }
 sqlx = { version = "0.7", features = ["runtime-tokio-native-tls", "postgres", "uuid", "chrono"] }
 rust-s3 = { version = "0.37", features = ["tokio-rustls-tls"] }
+zip = "0.6"
 jsonwebtoken = "9"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -32,3 +37,5 @@ futures = "0.3"
 reqwest = { version = "0.11", default-features = false, features = ["json", "multipart", "stream", "rustls-tls"] }
 mime = "0.3"
 tokio-util = { version = "0.7", features = ["io"] }
+fake = { version = "2.9", features = ["derive", "uuid", "chrono"] }
+rand = "0.8"

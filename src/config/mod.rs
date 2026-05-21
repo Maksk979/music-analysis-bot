@@ -18,6 +18,11 @@ pub struct Config {
     pub recommender_service_url: String,
     pub max_file_size: usize,
     pub allowed_mime_types: Vec<String>,
+    /// Webhook URL куда Rust-бот шлёт POST после изменения статуса файла.
+    /// Если не задан — уведомления не рассылаются (только обновляется БД).
+    pub webhook_notify_url: Option<String>,
+    /// Секрет для проверки вызовов /api/notify от внутренних сервисов.
+    pub internal_api_secret: String,
 }
 
 impl Config {
@@ -41,6 +46,9 @@ impl Config {
             allowed_mime_types: env::var("ALLOWED_MIME_TYPES")
                 .unwrap_or_else(|_| "audio/mpeg,audio/wav,audio/ogg,audio/mp4,audio/x-m4a".to_string())
                 .split(',').map(|s| s.trim().to_string()).collect(),
+            webhook_notify_url: env::var("WEBHOOK_NOTIFY_URL").ok(),
+            internal_api_secret: env::var("INTERNAL_API_SECRET")
+                .unwrap_or_else(|_| "internal-secret".to_string()),
         })
     }
 }

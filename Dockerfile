@@ -10,7 +10,9 @@ RUN apt-get update && apt-get install -y \
 
 # Cache dependencies
 COPY Cargo.toml ./
-RUN mkdir src && echo "fn main(){}" > src/main.rs
+RUN mkdir -p src/bin \
+    && echo "fn main(){}" > src/main.rs \
+    && echo "fn main(){}" > src/bin/seed.rs
 RUN cargo build --release
 RUN rm -rf src
 

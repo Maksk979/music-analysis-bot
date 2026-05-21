@@ -145,4 +145,36 @@ mod tests {
         let result = service2.verify_token(&token);
         assert!(result.is_err());
     }
+
+    #[test]
+    fn test_extract_user_id_matches_subject() {
+        let service = JwtService::new("test_secret_key_long_enough", 24);
+        let user_id = Uuid::new_v4();
+        let token = service.generate_token(user_id, 1).unwrap();
+        let extracted = service.extract_user_id(&token).unwrap();
+        assert_eq!(extracted, user_id);
+    }
+
+    #[test]
+    fn test_expired_token_rejected() {
+        // jsonwebtoken applies a default 60-second leeway, so we craft a token
+        // with `exp` well in the past (1 hour ago) to make sure validation fails.
+        let secret = "test_secret_key_long_enough";
+        let past = (Utc::now() - Duration::hours(1)).timestamp() as usize;
+        let claims = Claims {
+            sub: Uuid::new_v4().to_string(),
+            telegram_id: 1,
+            exp: past,
+            iat: past,
+        };
+        let token = encode(
+            &Header::default(),
+            &claims,
+            &EncodingKey::from_secret(secret.as_bytes()),
+        )
+        .unwrap();
+
+        let service = JwtService::new(secret, 24);
+        assert!(service.verify_token(&token).is_err());
+    }
 }

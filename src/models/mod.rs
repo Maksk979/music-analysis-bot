@@ -115,3 +115,25 @@ pub struct ProcessingQueueItem {
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::Type)]
 #[sqlx(type_name = "queue_status", rename_all = "snake_case")]
 pub enum QueueStatus { Queued, Processing, Done, Failed }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn lang_round_trip() {
+        assert_eq!(Lang::from_str("ru"), Lang::Ru);
+        assert_eq!(Lang::from_str("en"), Lang::En);
+        assert_eq!(Lang::from_str("unknown"), Lang::En);
+        assert_eq!(Lang::Ru.as_str(), "ru");
+        assert_eq!(Lang::En.as_str(), "en");
+    }
+
+    #[test]
+    fn audio_file_status_display() {
+        assert_eq!(AudioFileStatus::Pending.to_string(), "pending");
+        assert_eq!(AudioFileStatus::Processing.to_string(), "processing");
+        assert_eq!(AudioFileStatus::Completed.to_string(), "completed");
+        assert_eq!(AudioFileStatus::Failed.to_string(), "failed");
+    }
+}

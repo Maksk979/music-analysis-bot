@@ -1,9 +1,9 @@
 use axum::{
     extract::{Multipart, State},
-    http::StatusCode,
+    http::{HeaderMap, StatusCode},
     Json,
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::{
@@ -15,7 +15,7 @@ use crate::{
     AppState,
 };
 
-#[derive(Serialize)]
+#[derive(Serialize, Deserialize, Clone)]
 pub struct UploadResponse {
     pub file_id: Uuid,
     pub message: String,
@@ -29,14 +29,41 @@ pub struct ErrorResponse {
 }
 
 /// POST /api/upload
-/// Accepts multipart/form-data with field `file`
-/// Returns 200 with UploadResponse or 4xx/5xx with ErrorResponse
+///
+/// Accepts multipart/form-data with field `file`.
+///
+/// Idempotency key
+/// ───────────────
+/// Clients MAY send the header `X-Idempotency-Key: <uuid>`.
+/// If the same key is seen again within 24 h for the same user, the cached
+/// response is returned without re-processing (HTTP 200, `duplicate: false`
+/// preserved from the first response).
 pub async fn upload_handler(
     State(state): State<AppState>,
     user: AuthenticatedUser,
+    headers: HeaderMap,
     mut multipart: Multipart,
 ) -> Result<Json<UploadResponse>, (StatusCode, Json<ErrorResponse>)> {
-    // Extract the file field from multipart
+    // ── Idempotency key check ─────────────────────────────────────────────────
+    let idempotency_key = headers
+        .get("X-Idempotency-Key")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string());
+
+    if let Some(ref key) = idempotency_key {
+        if let Ok(Some(cached)) = state.db.get_idempotency(key, user.user_id).await {
+            tracing::info!(
+                "Idempotency hit for key={} user={}",
+                key,
+                user.user_id
+            );
+            let resp: UploadResponse = serde_json::from_value(cached)
+                .map_err(|_| api_error(StatusCode::INTERNAL_SERVER_ERROR, "Cached response corrupt"))?;
+            return Ok(Json(resp));
+        }
+    }
+
+    // ── Read multipart file ───────────────────────────────────────────────────
     let field = multipart
         .next_field()
         .await
@@ -59,7 +86,7 @@ pub async fn upload_handler(
         .map_err(|e| api_error(StatusCode::BAD_REQUEST, &format!("Failed to read file: {}", e)))?
         .to_vec();
 
-    // Validate file
+    // ── Validate ──────────────────────────────────────────────────────────────
     validate_file(
         &data,
         &content_type,
@@ -70,25 +97,26 @@ pub async fn upload_handler(
 
     let file_hash = compute_hash(&data);
 
-    // Duplicate check
+    // ── Duplicate check ───────────────────────────────────────────────────────
     if let Ok(Some(existing)) = state
         .db
         .find_duplicate_by_hash(user.user_id, &file_hash)
         .await
     {
-        return Ok(Json(UploadResponse {
+        let resp = UploadResponse {
             file_id: existing.id,
             message: "Duplicate file detected — returning existing record".to_string(),
             status: existing.status.to_string(),
             duplicate: true,
-        }));
+        };
+        maybe_store_idempotency(&state, &idempotency_key, user.user_id, &resp).await;
+        return Ok(Json(resp));
     }
 
-    // Build MinIO object key: users/{user_id}/{uuid}/{filename}
+    // ── Upload to MinIO ───────────────────────────────────────────────────────
     let object_id = Uuid::new_v4();
     let minio_key = format!("users/{}/{}/{}", user.user_id, object_id, filename);
 
-    // Upload to MinIO
     state
         .storage
         .upload_file(&minio_key, &data, &content_type)
@@ -98,15 +126,15 @@ pub async fn upload_handler(
             api_error(StatusCode::INTERNAL_SERVER_ERROR, "Storage upload failed")
         })?;
 
-    // Persist record in DB
+    // ── Persist in DB ─────────────────────────────────────────────────────────
     let audio_file = state
         .db
         .create_audio_file(&CreateAudioFile {
             user_id: user.user_id,
-            original_name: filename,
+            original_name: filename.clone(),
             minio_key,
             file_size: data.len() as i64,
-            mime_type: content_type,
+            mime_type: content_type.clone(),
             file_hash,
         })
         .await
@@ -115,7 +143,7 @@ pub async fn upload_handler(
             api_error(StatusCode::INTERNAL_SERVER_ERROR, "Database error")
         })?;
 
-    // Enqueue for analysis
+    // ── Enqueue ───────────────────────────────────────────────────────────────
     state
         .db
         .enqueue_file(audio_file.id)
@@ -125,25 +153,59 @@ pub async fn upload_handler(
             api_error(StatusCode::INTERNAL_SERVER_ERROR, "Queue error")
         })?;
 
-    tracing::info!(
-        "File uploaded: {} by user {}",
-        audio_file.id,
-        user.user_id
-    );
+    tracing::info!("File uploaded: {} by user {}", audio_file.id, user.user_id);
 
-    Ok(Json(UploadResponse {
+    // ── Submit to analyzer (fire-and-forget background task) ─────────────────
+    {
+        let analyzer = state.analyzer.clone();
+        let file_id = audio_file.id;
+        let bytes = data;
+        let fname = filename.clone();
+        let mime = content_type.clone();
+        tokio::spawn(async move {
+            if let Err(e) = analyzer.submit_file(file_id, bytes, fname, mime).await {
+                tracing::warn!("Analyzer submission failed for {}: {}", file_id, e);
+            }
+        });
+    }
+
+    // ── Build + cache response ────────────────────────────────────────────────
+    let resp = UploadResponse {
         file_id: audio_file.id,
         message: "File uploaded successfully and queued for analysis".to_string(),
         status: "pending".to_string(),
         duplicate: false,
-    }))
+    };
+
+    maybe_store_idempotency(&state, &idempotency_key, user.user_id, &resp).await;
+
+    Ok(Json(resp))
 }
 
+// ── Helpers ───────────────────────────────────────────────────────────────────
+
 fn api_error(status: StatusCode, message: &str) -> (StatusCode, Json<ErrorResponse>) {
-    (
-        status,
-        Json(ErrorResponse {
-            error: message.to_string(),
-        }),
-    )
+    (status, Json(ErrorResponse { error: message.to_string() }))
+}
+
+/// Persist the response under the idempotency key if one was provided.
+/// Failures are non-fatal — we just log them.
+async fn maybe_store_idempotency(
+    state: &AppState,
+    key: &Option<String>,
+    user_id: Uuid,
+    resp: &UploadResponse,
+) {
+    if let Some(k) = key {
+        let val = match serde_json::to_value(resp) {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::warn!("Failed to serialize idempotency response: {}", e);
+                return;
+            }
+        };
+        if let Err(e) = state.db.store_idempotency(k, user_id, val).await {
+            tracing::warn!("Failed to store idempotency key {}: {}", k, e);
+        }
+    }
 }
